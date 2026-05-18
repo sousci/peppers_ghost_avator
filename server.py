@@ -148,7 +148,7 @@ async def websocket_endpoint(websocket: WebSocket):
 
             # 💡 独り言の生成プロンプトを大幅強化
             elif data.get("type") == "idle_soliloquy":
-                print("【システム】: 10秒の静寂による独り言要求を受信")
+                print("【システム】: 30秒の静寂による独り言要求を受信")
                 now_str = datetime.now().strftime("%Y年%m月%d日 %H時%M分")
                 
                 system_instruction = f"""

@@ -72,7 +72,7 @@
         }
         #chat-log::-webkit-scrollbar { display: none; }
 
-        /* ユーザーの音声認識結果（56px・真っ白） */
+        /* ユーザーの音声認識結果 */
         .msg-user { 
             font-size: 56px; 
             font-weight: bold;
@@ -82,7 +82,7 @@
             width: 100%;
         }
 
-        /* AIの回答・読み上げテキスト（超巨大・ネオンエメラルド） */
+        /* AIの回答・読み上げテキスト */
         .msg-ai { 
             font-size: 72px; 
             font-weight: 900; 
@@ -94,7 +94,7 @@
             width: 100%;
         }
 
-        /* 音声の入力待ち・初期待機表示（48px・シアン明滅） */
+        /* 音声の入力待ち・初期待機表示 */
         .msg-status {
             font-size: 48px;
             font-weight: bold;
@@ -104,7 +104,6 @@
             animation: pulse 1.0s infinite alternate; 
         }
 
-        /* 点滅アニメーションキーフレーム */
         @keyframes pulse {
             0% { opacity: 0.3; }
             100% { opacity: 1.0; }
@@ -122,9 +121,22 @@
             height: 100% !important;
         }
 
-        /* リアルタイム調整用CSSフィルターのベース */
         .avatar-filter-target {
             filter: brightness(0.7) contrast(1.5) saturate(3.0);
+        }
+
+        /* 💡 修正箇所：右上(right)から左上(left)へサイバーモニター窓を移動 */
+        #camera-preview {
+            position: absolute;
+            top: 20px;
+            left: 20px; /* 💡 修正：反対側（左）の端へ */
+            width: 220px;
+            height: auto;
+            border: 2px solid #00ffcc;
+            box-shadow: 0 0 15px rgba(0, 255, 204, 0.5);
+            border-radius: 6px;
+            z-index: 1000;
+            background-color: #111;
         }
 
         /* オプション設定画面（オーバーレイ） */
@@ -225,13 +237,16 @@
     <div id="mic-indicator"></div>
 
     <div id="ui-panel">
+        <img id="camera-preview" src="data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==" alt="Camera Preview" style="display: none;">
+        
         <button id="start-btn">システム起動（またはスペースキー）</button>
         <div id="chat-log">
             <div class="msg-status" id="system-status">アバターモデルを読み込んでいます...</div>
         </div>
     </div>
 
-    <div id="canvas-container" class="avatar-filter-target"></div>
+    <div id="canvas-container" class="avatar-filter-target">
+    </div>
 
     <div id="options-overlay">
         <h2 style="margin-top:0; color:#00ffcc; text-align:center; font-size:28px;">SYSTEM OPTIONS</h2>
@@ -240,6 +255,15 @@
             <div class="options-section">
                 <h3>Visual & Fitting</h3>
                 
+                <div class="control-group" style="margin-bottom: 15px;">
+                    <label style="color:#00ffcc; font-weight: bold; font-size: 15px;">📷 カメラデバイス選択</label>
+                    <select id="param-camera">
+                        <option value="0" selected>カメラ 0 (標準 / 内蔵カメラ)</option>
+                        <option value="1">カメラ 1 (外付けUSBカメラ等)</option>
+                        <option value="2">カメラ 2 (予備デバイス)</option>
+                    </select>
+                </div>
+
                 <div class="control-group" style="margin-bottom: 25px; border-bottom: 1px solid rgba(0,255,204,0.15); padding-bottom: 15px;">
                     <label style="color:#00ffcc; font-weight: bold; font-size: 16px;">画面左右反転モード</label>
                     <select id="param-mirror">
@@ -345,7 +369,6 @@
         import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
         import { VRMLoaderPlugin } from '@pixiv/three-vrm';
 
-        // --- 1. Three.js セットアップ ---
         const container = document.getElementById('canvas-container');
         const scene = new THREE.Scene();
         
@@ -366,7 +389,6 @@
         directionalLight.position.set(1.0, 1.0, 1.0).normalize();
         scene.add(directionalLight);
 
-        // --- 2. VRMモデルの読み込み ---
         let currentVrm = undefined;
         let isSpeaking = false; 
         const loader = new GLTFLoader();
@@ -380,14 +402,12 @@
             currentVrm = vrm;
             vrm.scene.rotation.y = Math.PI; 
             vrm.scene.position.x = 0.0; 
-            
             vrm.scene.scale.set(1.18, 1.18, 1.18); 
             vrm.scene.position.y = -0.15; 
             
             document.getElementById('system-status').innerText = "システム起動準備完了（スペースキーを叩いてください）";
         });
 
-        // --- 3. アニメーションループ ---
         const clock = new THREE.Clock();
         let blinkTimer = 0;
         let nextBlinkTime = 3.0; 
@@ -401,25 +421,18 @@
             if (currentVrm) {
                 currentVrm.update(deltaTime);
 
-                // ① 待機モーション（呼吸）
                 const spine = currentVrm.humanoid.getNormalizedBoneNode('spine');
-                if (spine) {
-                    spine.rotation.x = Math.sin(t * 2.5) * 0.01 + 0.01;
-                }
+                if (spine) spine.rotation.x = Math.sin(t * 2.5) * 0.01 + 0.01;
                 const head = currentVrm.humanoid.getNormalizedBoneNode('head');
-                if (head) {
-                    head.rotation.y = Math.sin(t * 0.5) * 0.02;
-                }
+                if (head) head.rotation.y = Math.sin(t * 0.5) * 0.02;
                 
                 const baseY = parseFloat(document.getElementById('param-vrm-y').value);
                 currentVrm.scene.position.y = baseY + Math.sin(t * 2.5) * 0.005;
 
-                // ② 自動まばたき
                 blinkTimer += deltaTime;
                 if (blinkTimer >= nextBlinkTime) {
                     const blinkDuration = 0.2;
                     const progress = blinkTimer - nextBlinkTime;
-
                     if (progress < blinkDuration) {
                         const blinkVal = Math.sin((progress / blinkDuration) * Math.PI);
                         currentVrm.expressionManager.setValue('blink', blinkVal);
@@ -430,7 +443,6 @@
                     }
                 }
 
-                // ③ リアルタイム口パク
                 if (isSpeaking && currentVrm.expressionManager) {
                     const mouthOpen = Math.sin(t * 15) * 0.4 + 0.4; 
                     currentVrm.expressionManager.setValue('aa', mouthOpen);
@@ -438,7 +450,6 @@
                     currentVrm.expressionManager.setValue('aa', 0);
                 }
 
-                // ④ 自然な立ちポーズ ＆ 腕の揺れ
                 const leftUpperArm = currentVrm.humanoid.getNormalizedBoneNode('leftUpperArm');
                 if (leftUpperArm) {
                     leftUpperArm.rotation.z = 1.3 + Math.sin(t * 1.5) * 0.02 + Math.cos(t * 0.7) * 0.01;
@@ -450,13 +461,9 @@
                     rightUpperArm.rotation.x = 0.1 + Math.sin(t * 1.0) * 0.015;
                 }
                 const leftLowerArm = currentVrm.humanoid.getNormalizedBoneNode('leftLowerArm');
-                if (leftLowerArm) {
-                    leftLowerArm.rotation.y = -1.0 + Math.cos(t * 1.3) * 0.03 + Math.sin(t * 0.6) * 0.015;
-                }
+                if (leftLowerArm) leftLowerArm.rotation.y = -1.0 + Math.cos(t * 1.3) * 0.03 + Math.sin(t * 0.6) * 0.015;
                 const rightLowerArm = currentVrm.humanoid.getNormalizedBoneNode('rightLowerArm');
-                if (rightLowerArm) {
-                    rightLowerArm.rotation.y = 1.0 + Math.cos(t * 1.4) * 0.03 + Math.sin(t * 0.5) * 0.015;
-                }
+                if (rightLowerArm) rightLowerArm.rotation.y = 1.0 + Math.cos(t * 1.4) * 0.03 + Math.sin(t * 0.5) * 0.015;
             }
             renderer.render(scene, camera);
         }
@@ -483,26 +490,26 @@
         let isAiTurn = false; 
         let isStarted = false; 
         let isOptionsOpen = false; 
-
-        // 💡 デバッグ解決：放置タイマーのライフサイクル制御（30秒に変更）
         let idleTimer = null;
-        const IDLE_TIMEOUT_MS = 30000; // 💡 30秒間完全な無発話があれば、自発的に独り言をリクエスト
 
         function resetIdleTimer() {
-            stopIdleTimer();    
-            // 起動前、設定画面展開中、またはAIが思考・発話中はカウントしない（完全な排他ガード）
+            stopIdleTimer();
             if (!isStarted || isOptionsOpen || isSpeaking || isAiTurn) return;
             
+            const minTimeout = 30000; 
+            const maxTimeout = 90000; 
+            const dynamicTimeout = Math.floor(minTimeout + Math.random() * (maxTimeout - minTimeout));
+            
+            console.log(`【タイマー稼働】次回の自発的な独り言まで: ${(dynamicTimeout / 1000).toFixed(1)} 秒`);
+
             idleTimer = setTimeout(() => {
                 if (!isStarted || isSpeaking || isAiTurn || isOptionsOpen) return;
-                console.log("【システム】30秒の静寂を検知。環境察知型の独り言を要求します。");
                 isAiTurn = true; 
                 try { recognition.stop(); } catch(e){}
                 isRecognitionActive = false;
                 micIndicator.style.display = 'none';
-                
                 ws.send(JSON.stringify({ type: "idle_soliloquy" }));
-            }, IDLE_TIMEOUT_MS);
+            }, dynamicTimeout);
         }
 
         function stopIdleTimer() {
@@ -522,10 +529,12 @@
             chatLog.innerHTML = "";
             appendMessage('status', "何か 話しかけてください...");
             
+            ws.send(JSON.stringify({ type: "start_system" }));
+            
             sendSettingsToServer();
             isAiTurn = false; 
             startListening();
-            resetIdleTimer(); // 起動の瞬間からカウント開始
+            resetIdleTimer(); 
         }
 
         startBtn.addEventListener('click', activateSystem);
@@ -535,7 +544,6 @@
                 event.preventDefault(); 
                 activateSystem();
             }
-            
             if (event.code === 'Escape') {
                 event.preventDefault();
                 toggleOptionsWindow();
@@ -553,9 +561,7 @@
             } else {
                 isOptionsOpen = false;
                 optionsOverlay.style.display = 'none';
-                
                 sendSettingsToServer();
-                
                 if (isStarted) {
                     isAiTurn = true; 
                     ws.send(JSON.stringify({ type: "settings_changed" }));
@@ -573,43 +579,38 @@
             const vPitch = (parseInt(document.getElementById('param-pitch').value) >= 0 ? "+" : "") + document.getElementById('param-pitch').value + "Hz";
             const vVoice = document.getElementById('param-voice').value;
             const vMirror = document.getElementById('param-mirror').value;
+            const vCamera = parseInt(document.getElementById('param-camera').value);
 
             ws.send(JSON.stringify({
                 type: "settings",
                 voice: vVoice,
                 rate: vRate,
                 pitch: vPitch,
-                mirror: vMirror
+                mirror: vMirror,
+                camera: vCamera
             }));
         }
 
         function appendMessage(role, text) {
             if (!isStarted && role !== 'status') return null;
-            
             const msgDiv = document.createElement('div');
             if (role === 'user') msgDiv.className = 'msg-user';
             else if (role === 'ai') msgDiv.className = 'msg-ai';
             else if (role === 'status') msgDiv.className = 'msg-status'; 
-            
             msgDiv.innerText = text;
             chatLog.appendChild(msgDiv);
-            
             chatLog.scrollTop = chatLog.scrollHeight;
             return msgDiv; 
         }
 
         function startListening() {
             if (!isStarted || isSpeaking || isRecognitionActive || isAiTurn || isOptionsOpen) return;
-            
             setTimeout(() => {
                 if (!isStarted || isSpeaking || isRecognitionActive || isAiTurn || isOptionsOpen) return;
-                try {
-                    recognition.start();
-                } catch (e) { console.log("認識起動スキップ:", e); }
+                try { recognition.start(); } catch (e) {}
             }, 300);
         }
 
-        // 💡 デバッグ解決：マイクの自動再起動によるタイマー破壊を防ぐため、onstart/onendでのタイマー操作を撤廃
         recognition.onstart = () => {
             if (!isStarted || isOptionsOpen) {
                 try { recognition.stop(); } catch(e){}
@@ -623,21 +624,15 @@
             if (!isStarted || isOptionsOpen) return;
             const speechText = event.results[0][0].transcript;
             appendMessage('user', `あなた: ${speechText}`);
-            
             isAiTurn = true; 
             try { recognition.stop(); } catch(e){}
             isRecognitionActive = false;
             micIndicator.style.display = 'none'; 
-            stopIdleTimer(); // ユーザーが発言を確定した瞬間にタイマー停止
-
-            ws.send(JSON.stringify({
-                type: "text",
-                text: speechText
-            }));
+            stopIdleTimer(); 
+            ws.send(JSON.stringify({ type: "text", text: speechText }));
         };
 
         recognition.onerror = (event) => {
-            console.log("音声認識エラー:", event.error);
             isRecognitionActive = false;
             micIndicator.style.display = 'none';
             resetIdleTimer();
@@ -646,20 +641,26 @@
         recognition.onend = () => {
             isRecognitionActive = false;
             micIndicator.style.display = 'none'; 
-            if (isStarted && !isAiTurn && !isSpeaking && !isOptionsOpen) {
-                startListening();
-            }
+            if (isStarted && !isAiTurn && !isSpeaking && !isOptionsOpen) startListening();
         };
 
         ws.onmessage = async (event) => {
             if (!isStarted) return;
             const msg = JSON.parse(event.data);
+            
+            // サーバーから配信されてくるリアルタイムカメラ映像の描画ハンドラ
+            if (msg.type === "camera_preview") {
+                const previewImg = document.getElementById('camera-preview');
+                if (previewImg) {
+                    previewImg.style.display = 'block';
+                    previewImg.src = 'data:image/jpeg;base64,' + msg.image;
+                }
+                return;
+            }
+
             if (msg.type === "audio") {
-                stopIdleTimer(); // 音声パケットを受信し始めたら即タイマーオフ
-                audioQueue.push({
-                    bufferArray: bytesToBuffer(msg.audio),
-                    text: msg.text
-                });
+                stopIdleTimer(); 
+                audioQueue.push({ bufferArray: bytesToBuffer(msg.audio), text: msg.text });
                 if (!isPlayingAudio) playNextInQueue();
             }
         };
@@ -668,54 +669,35 @@
             const binaryString = window.atob(base64Str);
             const len = binaryString.length;
             const bytes = new Uint8Array(len);
-            for (let i = 0; i < len; i++) {
-                bytes[i] = binaryString.charCodeAt(i);
-            }
+            for (let i = 0; i < len; i++) { bytes[i] = binaryString.charCodeAt(i); }
             return bytes.buffer;
         }
 
         async function playNextInQueue() {
             if (!isStarted) return;
-            
             if (audioQueue.length === 0) {
-                isPlayingAudio = false;
-                isSpeaking = false; 
-                isAiTurn = false; 
-                
+                isPlayingAudio = false; isSpeaking = false; isAiTurn = false; 
                 appendMessage('status', "何か 話しかけてください...");
-                startListening(); 
-                resetIdleTimer(); // 💡 返答（または独り言）が喋り終わった瞬間から、正確に次の30秒のカウントを開始！
+                startListening(); resetIdleTimer(); 
                 return;
             }
-            
-            isPlayingAudio = true;
-            isSpeaking = true; 
-            
+            isPlayingAudio = true; isSpeaking = true; 
             const currentItem = audioQueue.shift();
-            appendMessage('ai', currentItem.text); // つぶやいた内容を画面上にバシッと描画
-
+            appendMessage('ai', currentItem.text); 
             try {
                 const audioBuffer = await audioCtx.decodeAudioData(currentItem.bufferArray);
                 const source = audioCtx.createBufferSource();
                 source.buffer = audioBuffer;
                 source.connect(audioCtx.destination);
-                
-                source.onended = () => {
-                    playNextInQueue();
-                };
+                source.onended = () => { playNextInQueue(); };
                 source.start(0);
-            } catch (e) {
-                console.error("再生エラー:", e);
-                playNextInQueue();
-            }
+            } catch (e) { playNextInQueue(); }
         }
 
-        // --- 5. オプションUI操作の同期イベント群 ---
         const filterContainer = document.querySelector('.avatar-filter-target');
         const pBright = document.getElementById('param-bright');
         const pContrast = document.getElementById('param-contrast');
         const pSaturate = document.getElementById('param-saturate');
-        
         function updateCSSFilters() {
             document.getElementById('val-bright').innerText = pBright.value;
             document.getElementById('val-contrast').innerText = pContrast.value;
@@ -729,7 +711,6 @@
         const pVrmX = document.getElementById('param-vrm-x');
         const pVrmY = document.getElementById('param-vrm-y');
         const pVrmScale = document.getElementById('param-vrm-scale');
-
         pVrmX.addEventListener('input', (e) => {
             const val = parseFloat(e.target.value);
             document.getElementById('val-vrm-x').innerText = val.toFixed(2);
@@ -747,26 +728,22 @@
 
         const pMirror = document.getElementById('param-mirror');
         pMirror.addEventListener('change', (e) => {
-            if (e.target.value === 'true') {
-                document.body.style.transform = 'scaleX(-1)';
-            } else {
-                document.body.style.transform = 'none';
-            }
+            if (e.target.value === 'true') document.body.style.transform = 'scaleX(-1)';
+            else document.body.style.transform = 'none';
         });
+
+        const pCamera = document.getElementById('param-camera');
+        pCamera.addEventListener('change', () => { sendSettingsToServer(); });
 
         document.getElementById('param-rate').addEventListener('input', (e) => {
             document.getElementById('val-rate').innerText = (parseInt(e.target.value) >= 0 ? "+" : "") + e.target.value + "%";
         });
-        
         document.getElementById('param-pitch').addEventListener('input', (e) => {
             document.getElementById('val-pitch').innerText = (parseInt(e.target.value) >= 0 ? "+" : "") + e.target.value + "Hz";
         });
-
         window.addEventListener('resize', () => {
-            width = container.clientWidth;
-            height = container.clientHeight;
-            camera.aspect = width / height;
-            camera.updateProjectionMatrix();
+            width = container.clientWidth; height = container.clientHeight;
+            camera.aspect = width / height; camera.updateProjectionMatrix();
             renderer.setSize(width, height);
         });
     </script>

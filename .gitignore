@@ -1,0 +1,9 @@
+# Pythonの仮想環境フォルダを除外
+venv/
+.venv/
+
+# Webへのショートカットファイルを除外
+# (Windowsのインターネットショートカットやリンクファイル、Macのwebloc)
+*.url
+*.lnk
+*.webloc

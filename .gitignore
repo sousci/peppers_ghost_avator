@@ -7,3 +7,16 @@ venv/
 *.url
 *.lnk
 *.webloc
+
+# Caffeのプロトタイプファイルを除外
+.prototxt
+.caffemodel
+# Jupyter Notebookのチェックポイントファイルを除外
+.ipynb_checkpoints/
+# VSCodeの設定ファイルを除外
+.vscode/
+# PyCharmの設定ファイルを除外
+.idea/
+# MacのDS_Storeファイルを除外
+.DS_Store
+

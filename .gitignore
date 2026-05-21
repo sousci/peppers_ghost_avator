@@ -20,3 +20,7 @@ venv/
 # MacのDS_Storeファイルを除外
 .DS_Store
 
+# Pythonのキャッシュファイルを除外
+__pycache__/
+*.pyc
+

@@ -2,6 +2,7 @@ import asyncio
 import base64
 import threading
 from datetime import datetime
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, WebSocket
 from fastapi.staticfiles import StaticFiles
 import uvicorn
@@ -12,7 +13,21 @@ from google.genai import types
 import config
 from camera import CameraSensor
 
-app = FastAPI()
+camera_sensor = None
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global camera_sensor
+    config.main_loop = asyncio.get_running_loop()
+    
+    yield
+    
+    if camera_sensor:
+        print("[PROCESS] Shutting down application. Releasing hardware resources...")
+        camera_sensor.stop()
+        await asyncio.sleep(0.5)
+
+app = FastAPI(lifespan=lifespan)
 client = genai.Client(api_key=config.GEMINI_API_KEY)
 
 async def generate_cloud_audio(text: str, voice: str, rate: str, pitch: str) -> bytes:
@@ -27,12 +42,9 @@ async def generate_cloud_audio(text: str, voice: str, rate: str, pitch: str) -> 
         print(f"[ERROR] TTS synthesis failed: {e}")
         return b""
 
-def launch_camera_worker():
-    sensor = CameraSensor()
-    sensor.start_loop()
-
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
+    global camera_sensor
     await websocket.accept()
     config.active_websocket = websocket
     print("[SUCCESS] WebSocket connection established.")
@@ -40,56 +52,36 @@ async def websocket_endpoint(websocket: WebSocket):
     chat = client.chats.create(
         model='gemini-2.5-flash',
         history=[
-            types.Content(role="user", parts=[types.Part.from_text(text="あなたは等身大ディスプレイの中にいるサイバーアシスタントです。フランクかつ親しみやすい口調で、2〜3文の短めの文章で回答してください。")]),
-            types.Content(role="model", parts=[types.Part.from_text(text="了解！設定に合わせた最適なボイスでサポートするよ！")])
+            types.Content(role="user", parts=[types.Part.from_text(text="あなたは等身大ホログラムとして物理筐体の中に配置されたデジタルAIアシスタントの女の子です。あなたの名前は『ソラ』です。親しみやすく、フランクで活発、そして知的な性格です。ユーザーに対しては、タメ口をベースにした非常にフレンドリーで好意的なトーンで接してください。1文あたり長くても30〜40文字程度で、短くリズミカルに返答してください。")]),
+            types.Content(role="model", parts=[types.Part.from_text(text="はーい！私はソラだよ！何でもフランクに話しかけてね！")])
         ]
     )
 
     try:
         while True:
             data = await websocket.receive_json()
-
+            
             if data.get("type") == "start_system":
-                print("[PROCESS] Initializing camera thread...")
+                print("[PROCESS] Initializing camera thread from websocket trigger...")
                 if not config.camera_thread_started:
-                    config.camera_thread_started = True
-                    camera_thread = threading.Thread(target=launch_camera_worker, daemon=True)
+                    camera_sensor = CameraSensor()
+                    camera_thread = threading.Thread(target=camera_sensor.start_loop, daemon=True)
                     camera_thread.start()
+                    config.camera_thread_started = True
                 continue
 
             elif data.get("type") == "settings":
-                changes = []
-                new_voice = data.get("voice", config.system_settings["voice"])
-                new_rate = data.get("rate", config.system_settings["rate"])
-                new_pitch = data.get("pitch", config.system_settings["pitch"])
-                new_mirror = data.get("mirror", config.system_settings["mirror"])
-                new_camera_id = int(data.get("camera", config.current_camera_id))
-
-                if new_voice != config.system_settings["voice"]: changes.append("キャラクター（声色）")
-                if new_rate != config.system_settings["rate"]: changes.append("話速（スピード）")
-                if new_pitch != config.system_settings["pitch"]: changes.append("声のピッチ（高さ）")
-                if new_mirror != config.system_settings["mirror"]: changes.append("画面の左右反転")
-                if new_camera_id != config.current_camera_id: changes.append("使用カメラデバイス")
-                if data.get("visual_changed", False): changes.append("ビジュアル（位置・明るさ・サイズ等のフィッティング）")
-
-                websocket.scope["last_changes"] = "、".join(changes) if changes else "全体調整"
-
-                config.system_settings["voice"] = new_voice
-                config.system_settings["rate"] = new_rate
-                config.system_settings["pitch"] = new_pitch
-                config.system_settings["mirror"] = new_mirror
-                config.current_camera_id = new_camera_id
-                
-                if changes:
-                    print(f"[SUCCESS] Settings updated. Changed: {websocket.scope['last_changes']}")
+                config.system_settings["voice"] = data.get("voice", config.system_settings["voice"])
+                config.system_settings["rate"] = data.get("rate", config.system_settings["rate"])
+                config.system_settings["pitch"] = data.get("pitch", config.system_settings["pitch"])
+                config.system_settings["mirror"] = data.get("mirror", config.system_settings["mirror"])
+                config.current_camera_id = int(data.get("camera", config.current_camera_id))
+                print(f"[SUCCESS] Dynamic Settings Updated: {config.system_settings}")
                 continue
 
             elif data.get("type") == "settings_changed":
-                changed_items = websocket.scope.get("last_changes", "全体調整")
-                print(f"[PROCESS] Generating reaction for: {changed_items}")
                 system_instruction = "あなたは等身大ディスプレイの中にいるフランクなサイバーアシスタントです。1文の短い文章でつぶやいてください。"
-                reaction_prompt = f"ユーザーがあなたのシステム設定メニューから【{changed_items}】の項目を変更完了し、画面を閉じました。変更された具体的な項目名にフランクに触れつつ、調整してくれたことへの感謝やリアクションを、25文字程度で短く1文で言ってください。絵文字や解説文は禁止します。"
-
+                reaction_prompt = "ユーザーがあなたのシステム設定メニューを調整して画面を閉じました。設定をアップデートしてくれたことへの感謝やリアクションを、フランクに25文字程度で短く1文で言ってください。絵文字や解説文は禁止します。"
                 response = client.models.generate_content(model='gemini-2.5-flash', contents=f"{system_instruction}\n\n{reaction_prompt}")
                 reply_text = response.text.strip()
 
@@ -102,10 +94,8 @@ async def websocket_endpoint(websocket: WebSocket):
 
             elif data.get("type") == "idle_soliloquy":
                 print("[PROCESS] Idle timeout detected. Requesting soliloquy...")
-                now_str = datetime.now().strftime("%Y年%m月%d日 %H時%M分")
-                system_instruction = f"あなたは等身大ディスプレイの中にいるフランクなサイバーアシスタントです。以下のフレーズ集からインスピレーションを受け、25文字程度で短く1文で独り言をつぶやいてください。\n\n【フレーズ集】:\n{config.SOLILOQUY_POOL}"
-                soliloquy_prompt = f"（現在日時: {now_str}）あなたは今、『等身大ホログラム投影筐体』の中に立っています。" if config.system_settings["mirror"] == "true" else f"（現在日時: {now_str}）あなたは今、『PCモニター（デバッグ画面）』に映っています。"
-                soliloquy_prompt += "環境表現やあくび系を参考にフランクにつぶやいてください。"
+                system_instruction = f"指示: あなたは自発的に独り言を発信します。フレーズプールからインスピレーションを受け、フランクに30文字前後で短く1文で独り言をつぶやいてください。\n\n【フレーズプール】:\n{config.SOLILOQUY_POOL}"
+                soliloquy_prompt = "等身大ホログラムとしてハーフミラーの中にいる設定で、フランクに1文呟いてください。"
 
                 response = client.models.generate_content(model='gemini-2.5-flash', contents=f"{system_instruction}\n\n{soliloquy_prompt}")
                 reply_text = response.text.strip()
@@ -121,10 +111,8 @@ async def websocket_endpoint(websocket: WebSocket):
             elif data.get("type") == "text":
                 user_message = data.get("text")
                 print(f"[CHAT] User: {user_message}")
-                now_str = datetime.now().strftime("%Y年%m月%d日 %H時%M分")
-                enriched_prompt = f"（現在日時: {now_str}）\n{user_message}"
-
-                response = chat.send_message_stream(enriched_prompt)
+                
+                response = chat.send_message_stream(user_message)
                 sentence = ""
                 for chunk in response:
                     text_chunk = chunk.text
@@ -151,11 +139,7 @@ async def websocket_endpoint(websocket: WebSocket):
     finally:
         config.active_websocket = None
 
-@app.on_event("startup")
-async def startup_event():
-    config.main_loop = asyncio.get_running_loop()
-
-app.mount("/", StaticFiles(directory=".", html=True), name="static")
+app.mount("/", StaticFiles(directory="static", html=True), name="static")
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)

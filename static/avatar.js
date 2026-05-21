@@ -40,7 +40,7 @@ loader.load(vrmPath, (gltf) => {
     vrm.scene.scale.set(1.18, 1.18, 1.18); 
     vrm.scene.position.y = -0.15; 
     
-    document.getElementById('system-status').innerText = "システム起動準備完了（スペースキーを叩してください）";
+    document.getElementById('system-status').innerText = "システム起動準備完了（スペースキーで起動）";
 });
 
 const clock = new THREE.Clock();

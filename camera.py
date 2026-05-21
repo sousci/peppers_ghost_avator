@@ -16,6 +16,7 @@ class CameraSensor:
         self._prepare_models()
         self.net = cv2.dnn.readNetFromCaffe(self.proto_path, self.model_path)
         self.client = genai.Client(api_key=config.GEMINI_API_KEY)
+        self.running = False
 
     def _prepare_models(self):
         if not os.path.exists(self.proto_path):
@@ -26,64 +27,32 @@ class CameraSensor:
             urllib.request.urlretrieve("https://raw.githubusercontent.com/opencv/opencv_3rdparty/dnn_samples_face_detector_20170830/res10_300x300_ssd_iter_140000.caffemodel", self.model_path)
 
     def start_loop(self):
+        self.running = True
         current_cap_id = config.current_camera_id
-        print(f"[PROCESS] Connecting camera device (ID: {current_cap_id})...")
         cap = cv2.VideoCapture(current_cap_id)
-        print(f"[SUCCESS] Camera sensor pipeline activated (ID: {current_cap_id}).")
-        consecutive_face_frames = 0
+        
+        print(f"[SUCCESS] Camera Worker started with Device ID: {current_cap_id}")
         preview_count = 0
 
-        while True:
-            time.sleep(0.03)
-
-            # 動的なカメラデバイスの切り替え検知
+        while self.running:
             if config.current_camera_id != current_cap_id:
-                print(f"[PROCESS] Switching camera pipeline: ID {current_cap_id} -> {config.current_camera_id}...")
+                print(f"[PROCESS] Switching Camera Device: {current_cap_id} -> {config.current_camera_id}")
                 cap.release()
                 current_cap_id = config.current_camera_id
                 cap = cv2.VideoCapture(current_cap_id)
-                consecutive_face_frames = 0
-                if cap.isOpened():
-                    print(f"[SUCCESS] Switched camera device successfully (ID: {current_cap_id}).")
-
-            if not cap.isOpened():
-                time.sleep(0.5)
-                continue
 
             ret, frame = cap.read()
             if not ret:
+                time.sleep(0.03)
                 continue
 
-            h, w = frame.shape[:2]
-            blob = cv2.dnn.blobFromImage(cv2.resize(frame, (300, 300)), 1.0, (300, 300), (104.0, 177.0, 123.0))
-            self.net.setInput(blob)
-            detections = self.net.forward()
-
-            face_detected_this_frame = False
-            preview_frame = frame.copy()
-
-            for i in range(0, detections.shape[2]):
-                confidence = detections[0, 0, i, 2]
-                if confidence > 0.5:
-                    face_detected_this_frame = True
-                    box = detections[0, 0, i, 3:7] * [w, h, w, h]
-                    (startX, startY, endX, endY) = box.astype("int")
-                    startX, startY = max(0, startX), max(0, startY)
-                    endX, endY = min(w - 1, endX), min(h - 1, endY)
-                    cv2.rectangle(preview_frame, (startX, startY), (endX, endY), (0, 255, 204), 2)
-                    break
-
-            if face_detected_this_frame:
-                consecutive_face_frames += 1
-            else:
-                consecutive_face_frames = max(0, consecutive_face_frames - 1)
-
-            # フロントエンドへのリアルタイムモニター配信（10FPS間引き）
-            if config.active_websocket is not None and config.main_loop is not None:
+            # フロントエンドへのリアルタイムモニター配信（タイプ名を camera_preview に修正し、3フレームに1回間引き）
+            if config.active_websocket and config.main_loop:
                 preview_count += 1
                 if preview_count % 3 == 0:
                     try:
-                        small_preview = cv2.resize(preview_frame, (320, int(320 * h / w)))
+                        h, w = frame.shape[:2]
+                        small_preview = cv2.resize(frame, (320, int(320 * h / w)))
                         _, pre_buf = cv2.imencode('.jpg', small_preview, [int(cv2.IMWRITE_JPEG_QUALITY), 70])
                         pre_b64 = base64.b64encode(pre_buf).decode('utf-8')
                         asyncio.run_coroutine_threadsafe(
@@ -93,19 +62,38 @@ class CameraSensor:
                     except Exception:
                         pass
 
-            # 属性看破トリガー発火
-            current_time = time.time()
-            if consecutive_face_frames >= 3 and (current_time - config.last_greeting_time > config.DETECTION_COOLDOWN_SEC):
-                if config.active_websocket is not None and config.main_loop is not None:
-                    print("[PROCESS] Human detected by DNN. Initiating multimodal inference...")
-                    config.last_greeting_time = current_time
-                    consecutive_face_frames = 0
-                    asyncio.run_coroutine_threadsafe(
-                        self.process_spontaneous_greeting(frame),
-                        config.main_loop
-                    )
+            # クールダウン時間を考慮して顔検出および看破判定
+            now = time.time()
+            if now - config.last_greeting_time > config.DETECTION_COOLDOWN_SEC:
+                h, w = frame.shape[:2]
+                blob = cv2.dnn.blobFromImage(cv2.resize(frame, (300, 300)), 1.0, (300, 300), (104.0, 177.0, 123.0))
+                self.net.setInput(blob)
+                detections = self.net.forward()
 
-    async def process_spontaneous_greeting(self, frame):
+                face_detected = False
+                for i in range(0, detections.shape[2]):
+                    confidence = detections[0, 0, i, 2]
+                    if confidence > 0.65:
+                        face_detected = True
+                        break
+
+                if face_detected:
+                    config.last_greeting_time = now
+                    if config.main_loop:
+                        asyncio.run_coroutine_threadsafe(
+                            self._process_spontaneous_greeting(frame),
+                            config.main_loop
+                        )
+
+            time.sleep(0.03)
+
+        cap.release()
+        print("[SUCCESS] Camera Device safely released.")
+
+    def stop(self):
+        self.running = False
+
+    async def _process_spontaneous_greeting(self, frame):
         if config.active_websocket is None:
             return
         try:
@@ -133,5 +121,6 @@ class CameraSensor:
                 b64_audio = base64.b64encode(mp3_data).decode('utf-8')
                 await config.active_websocket.send_json({"type": "audio", "audio": b64_audio, "text": reply_text})
                 await config.active_websocket.send_json({"type": "end"})
+
         except Exception as e:
-            print(f"[ERROR] Multimodal process failed: {e}")
+            print(f"[ERROR] Spontaneous greeting generation failed: {e}")

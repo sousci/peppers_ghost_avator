@@ -1,0 +1,215 @@
+body {
+    margin: 0;
+    overflow: hidden;
+    background-color: #000000;
+    display: flex;
+    width: 100vw;
+    height: 100vh;
+    transform: scaleX(-1); /* ハーフミラー正像用の空間反転 */
+}
+
+#mic-indicator {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100vw;
+    height: 6px; 
+    background-color: #ff3333; 
+    z-index: 9999; 
+    display: none; 
+    box-shadow: 0 0 12px rgba(255, 51, 51, 0.8);
+    animation: pulse 1.0s infinite alternate;
+}
+
+#ui-panel {
+    width: 50vw;
+    height: 100vh;
+    box-sizing: border-box;
+    background-color: #000000;
+    z-index: 100;
+    font-family: 'Helvetica Neue', Arial, sans-serif;
+    position: relative;
+}
+
+#start-btn {
+    position: absolute;
+    top: 30px;
+    left: 60px;
+    padding: 15px 30px;
+    font-size: 20px;
+    font-weight: bold;
+    background-color: #00ffcc;
+    border: none;
+    border-radius: 6px;
+    cursor: pointer;
+    box-shadow: 0 4px 15px rgba(0, 255, 204, 0.3);
+    z-index: 110;
+}
+
+#chat-log {
+    width: 100%;
+    height: 100vh;
+    box-sizing: border-box;
+    padding: 60px;
+    display: flex;
+    flex-direction: column;
+    justify-content: flex-end; 
+    overflow-y: auto;
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+}
+#chat-log::-webkit-scrollbar { display: none; }
+
+.msg-user { 
+    font-size: 56px; 
+    font-weight: bold;
+    color: #ffffff; 
+    line-height: 1.3;
+    margin-bottom: 30px;
+    width: 100%;
+}
+
+.msg-ai { 
+    font-size: 72px; 
+    font-weight: 900; 
+    color: #00ffcc;
+    line-height: 1.4;
+    text-shadow: 0 0 20px rgba(0, 255, 204, 0.6);
+    word-break: break-all;
+    margin-bottom: 40px;
+    width: 100%;
+}
+
+.msg-status {
+    font-size: 48px;
+    font-weight: bold;
+    color: #00cccc;
+    margin-bottom: 40px;
+    width: 100%;
+    animation: pulse 1.0s infinite alternate; 
+}
+
+@keyframes pulse {
+    0% { opacity: 0.3; }
+    100% { opacity: 1.0; }
+}
+
+#canvas-container {
+    width: 50vw;
+    height: 100vh;
+    position: relative;
+    background-color: #000000;
+}
+canvas {
+    width: 100% !important;
+    height: 100% !important;
+}
+
+.avatar-filter-target {
+    filter: brightness(0.7) contrast(1.5) saturate(3.0);
+}
+
+#camera-preview {
+    position: absolute;
+    top: 20px;
+    left: 20px; 
+    width: 220px;
+    height: auto;
+    border: 2px solid #00ffcc;
+    box-shadow: 0 0 15px rgba(0, 255, 204, 0.5);
+    border-radius: 6px;
+    z-index: 1000;
+    background-color: #111;
+}
+
+#options-overlay {
+    position: absolute;
+    top: 10vh;
+    left: 10vw;
+    width: 80vw;
+    height: 80vh;
+    background: rgba(15, 15, 20, 0.95);
+    border: 2px solid #00ffcc;
+    box-shadow: 0 0 30px rgba(0, 255, 204, 0.4);
+    border-radius: 12px;
+    z-index: 10000;
+    display: none; 
+    color: white;
+    font-family: sans-serif;
+    box-sizing: border-box;
+    padding: 40px;
+}
+
+body:not([style*="scaleX(-1)"]) #options-overlay {
+    transform: none;
+}
+
+.options-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 40px;
+    height: 90%;
+}
+
+.options-section {
+    background: rgba(255,255,255,0.03);
+    padding: 20px;
+    border-radius: 8px;
+    border: 1px solid rgba(0,255,204,0.1);
+    overflow-y: auto;
+}
+
+.options-section h3 {
+    margin-top: 0;
+    color: #00ffcc;
+    border-bottom: 1px solid rgba(0,255,204,0.2);
+    padding-bottom: 8px;
+    font-size: 22px;
+}
+
+.control-group {
+    margin-bottom: 18px;
+    display: flex;
+    flex-direction: column;
+}
+
+.control-group label {
+    font-size: 15px;
+    margin-bottom: 6px;
+    color: #aaa;
+}
+
+.control-row {
+    display: flex;
+    align-items: center;
+    gap: 15px;
+}
+
+.control-row input[type="range"] {
+    flex-grow: 1;
+    accent-color: #00ffcc;
+}
+
+.control-row item-val {
+    width: 60px;
+    text-align: right;
+    font-family: monospace;
+    font-size: 16px;
+}
+
+select {
+    background: #222;
+    color: white;
+    border: 1px solid #00ffcc;
+    padding: 8px;
+    border-radius: 4px;
+    font-size: 16px;
+    width: 100%;
+}
+
+.esc-hint {
+    text-align: center;
+    color: #666;
+    font-size: 14px;
+    margin-top: 5px;
+}

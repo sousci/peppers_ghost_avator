@@ -1,8 +1,10 @@
-import asyncio
+﻿import asyncio
 import base64
 import threading
 import re
 import os
+import time
+import random
 from datetime import datetime
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, WebSocket
@@ -12,12 +14,113 @@ import edge_tts
 from google import genai
 from google.genai import types
 
+# Suppress noisy native logs from MediaPipe/Google runtime.
+# Note: "3" hides ERROR-level native logs as well.
+os.environ.setdefault("GLOG_minloglevel", "3")
+os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
+
 import config
 from camera import CameraSensor
 
 camera_sensor = None
+LOG_LEVEL_ORDER = {"DEBUG": 10, "INFO": 20, "WARN": 30, "ERROR": 40}
+LOG_MIN_LEVEL = os.getenv("APP_LOG_LEVEL", "INFO").upper()
+SENTENCE_DELIMITERS = ["。", "！", "？", "\n"]
+
+
+def mark_user_activity():
+    config.last_user_activity_time = time.monotonic()
+
+
+def get_soliloquy_pool_lines():
+    lines = []
+    for line in config.SOLILOQUY_POOL.splitlines():
+        cleaned = re.sub(r'^\s*\d+\.\s*', '', line).strip()
+        if cleaned:
+            lines.append(cleaned)
+    return lines
+
+
+def parse_emotion_and_command(raw_text: str):
+    current_emotion = "neutral"
+    text = (raw_text or "").strip()
+    match_emo = re.search(r'\[emotion:(.*?)\]', text)
+    if match_emo:
+        current_emotion = match_emo.group(1)
+        text = re.sub(r'\[emotion:.*?\]', '', text).strip()
+
+    cmd_data = None
+    match_cmd = re.search(r'\[command:(.*?)=(.*?)\]', text)
+    if match_cmd:
+        cmd_data = {"key": match_cmd.group(1), "value": match_cmd.group(2)}
+        text = re.sub(r'\[command:.*?\]', '', text).strip()
+    return text, current_emotion, cmd_data
+
+
+async def should_request_vision(user_message: str) -> bool:
+    gate_instruction = (
+        "You are a classifier. Return exactly one tag only. "
+        "If camera image understanding is required to answer the user, return [command:vision=REQUEST_FRAME]. "
+        "Otherwise return [command:vision=NONE]."
+    )
+    try:
+        response = await retry_async_task(
+            asyncio.to_thread,
+            client.models.generate_content,
+            model='gemini-2.5-flash',
+            contents=f"{gate_instruction}\nUser input: {user_message}"
+        )
+        text = (response.text or "").strip()
+        decision = "[command:vision=REQUEST_FRAME]" in text
+        custom_log("INFO  ", "GEMINI", f"Vision判定結果: {text}")
+        custom_log("INFO  ", "SYSTEM", f"Vision分岐: {'REQUEST_FRAME' if decision else 'NONE'}")
+        return decision
+    except Exception:
+        custom_log("WARN  ", "SYSTEM", "Vision判定に失敗したためテキスト応答を継続")
+        return False
+
+
+async def generate_vision_based_answer(user_message: str):
+    if not config.latest_camera_frame_b64:
+        custom_log("WARN  ", "SYSTEM", "Vision再生成を要求されたが最新カメラフレームが未取得")
+        return None
+    try:
+        frame_age = time.monotonic() - (config.latest_camera_frame_ts or 0)
+        image_bytes = base64.b64decode(config.latest_camera_frame_b64)
+        custom_log("INFO  ", "SYSTEM", f"カメラ映像をGeminiへ送信 (bytes={len(image_bytes)}, age={frame_age:.2f}s)")
+        prompt = (
+            "You are Sora, a life-size hologram assistant. "
+            "Use both the camera image and user input. "
+            "Start with [emotion:neutral|happy|sad|angry|surprised] and answer in 1-2 short Japanese sentences. "
+            "If needed, include at most one system command tag among scale/mirror/camera/rate. "
+            "Do not output any vision decision tags."
+        )
+        response = await retry_async_task(
+            asyncio.to_thread,
+            client.models.generate_content,
+            model='gemini-2.5-flash',
+            contents=[
+                types.Content(
+                    role="user",
+                    parts=[
+                        types.Part.from_text(text=prompt),
+                        types.Part.from_text(text=f"User input: {user_message}"),
+                        types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg"),
+                    ],
+                )
+            ],
+        )
+        generated = (response.text or "").strip()
+        custom_log("INFO  ", "GEMINI", f"Vision再生成テキスト: {generated}")
+        return generated
+    except Exception as e:
+        custom_log("WARN  ", "GEMINI", f"画像付き再生成に失敗: {e}")
+        return None
 
 def custom_log(level: str, tag: str, message: str):
+    normalized = level.strip().upper()
+    if LOG_LEVEL_ORDER.get(normalized, 20) < LOG_LEVEL_ORDER.get(LOG_MIN_LEVEL, 20):
+        return
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     colors = {"GEMINI": "\033[92m", "SYSTEM": "\033[92m", "CAMERA": "\033[94m"}
     lvl_colors = {"INFO  ": "", "WARN  ": "\033[93m", "ERROR ": "\033[91m"}
@@ -77,12 +180,13 @@ async def websocket_endpoint(websocket: WebSocket):
         history=[
             types.Content(role="user", parts=[types.Part.from_text(text="""
     あなたは等身大ホログラムAIキャラクター『ソラ』です。
-    指示1: 回答の冒頭に必ず [emotion:感情名] というタグを付けてください。(neutral, happy, sad, angry, surprised)
-    指示2: 性格はフランク、親しみやすい歓迎ムード。タメ口ベース。
+    指示1: 回答の冒頭に必ず [emotion:感情名] を付けてください。(neutral, happy, sad, angry, surprised)
+    指示2: 性格はフランクで親しみやすく、歓迎ムード。タメ口ベースです。
     指示3: 1文あたり30〜40文字程度で短く返答してください。
-    
-    指示4: ユーザーがアバターの見た目、話すスピード、カメラ、反転などのシステム調整を要求した場合、回答のどこかに必ず以下のタグを埋め込んでください。
-    [command:scale=UP], [command:scale=DOWN], [command:mirror=TOGGLE], [command:camera=TOGGLE], [command:rate=FASTER], [command:rate=SLOWER]
+
+    指示4: ユーザーがアバターの見た目、話すスピード、カメラ、反転などのシステム調整を要求した場合、
+    回答のどこかに必ず以下のタグを埋め込んでください。
+    [command:scale=UP], [command:scale=DOWN], [command:mirror=TOGGLE], [command:camera=TOGGLE], [command:camera=INTERNAL], [command:camera=USB], [command:camera=0], [command:camera=1], [command:rate=FASTER], [command:rate=SLOWER], [command:vision=REQUEST_FRAME]
     """)]),
             types.Content(role="model", parts=[types.Part.from_text(text="[emotion:happy]了解！ソラだよ。画面の操作も任せてね！")])
         ]
@@ -93,6 +197,7 @@ async def websocket_endpoint(websocket: WebSocket):
             data = await websocket.receive_json()
             
             if data.get("type") == "start_system":
+                mark_user_activity()
                 custom_log("INFO  ", "SYSTEM", "カメラ映像スレッドのトリガー受信・初期化開始")
                 if not config.camera_thread_started:
                     camera_sensor = CameraSensor()
@@ -111,6 +216,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 continue
 
             elif data.get("type") == "settings_changed":
+                mark_user_activity()
                 config.is_interacting = True
                 system_instruction = "あなたは等身大アシスタントです。必ず冒頭に [emotion:感情名] を付けて、設定変更への反応をフランクに25文字程度で短く1文で言ってください。"
                 
@@ -136,7 +242,13 @@ async def websocket_endpoint(websocket: WebSocket):
             elif data.get("type") == "idle_soliloquy":
                 custom_log("WARN  ", "SYSTEM", "アイドルタイムアウト検知・自発的独り言要求の送信")
                 config.is_interacting = True
-                system_instruction = f"指示: 必ず冒頭に [emotion:感情名] を付けて、プールから1文選ぶかインスパイアされてフランクにつぶやいてください。\n{config.SOLILOQUY_POOL}"
+                pool_lines = get_soliloquy_pool_lines()
+                system_instruction = (
+                    "指示: 必ず冒頭に [emotion:感情名] を付けて、"
+                    "以下のプールから1文だけ選んでそのまま出力してください。"
+                    "文言の追加・言い換え・新規作成は禁止です。\n"
+                    f"{config.SOLILOQUY_POOL}"
+                )
 
                 try:
                     response = await retry_async_task(asyncio.to_thread, client.models.generate_content, model='gemini-2.5-flash', contents=system_instruction)
@@ -150,6 +262,11 @@ async def websocket_endpoint(websocket: WebSocket):
                     current_emotion = match.group(1)
                     reply_text = re.sub(r'\[emotion:.*?\]', '', reply_text).strip()
 
+                # Guardrail: if model output drifts outside pool, force fallback to a pool line.
+                if pool_lines and reply_text not in pool_lines:
+                    custom_log("WARN  ", "SYSTEM", f"独り言がプール外だったため補正: {reply_text}")
+                    reply_text = random.choice(pool_lines)
+
                 custom_log("INFO  ", "GEMINI", f"独り言フレーズ確定 ({current_emotion}): {reply_text}")
 
                 mp3_data = await generate_cloud_audio(reply_text, config.system_settings["voice"], config.system_settings["rate"], config.system_settings["pitch"])
@@ -160,46 +277,194 @@ async def websocket_endpoint(websocket: WebSocket):
                 continue
 
             elif data.get("type") == "text":
+                mark_user_activity()
                 config.is_interacting = True
                 user_message = data.get("text")
                 custom_log("INFO  ", "SYSTEM", f"ユーザー入力データの受信: 「{user_message}」")
                 
                 try:
-                    # 【完治ポイント】同期関数ジェネレータのため retry_async_task(await) から完全解放して直接パース
+                    if await should_request_vision(user_message):
+                        vision_text = await generate_vision_based_answer(user_message)
+                        if vision_text:
+                            reply_text, current_emotion, cmd_data = parse_emotion_and_command(vision_text)
+                            if reply_text:
+                                mp3_data = await generate_cloud_audio(
+                                    reply_text,
+                                    config.system_settings["voice"],
+                                    config.system_settings["rate"],
+                                    config.system_settings["pitch"],
+                                )
+                                if mp3_data:
+                                    b64_audio = base64.b64encode(mp3_data).decode('utf-8')
+                                    await websocket.send_json({
+                                        "type": "audio",
+                                        "audio": b64_audio,
+                                        "text": reply_text,
+                                        "emotion": current_emotion,
+                                        "command": cmd_data
+                                    })
+                                    await websocket.send_json({"type": "end"})
+                                    continue
+
                     response = chat.send_message_stream(user_message)
                     sentence = ""
-                    current_emotion = "neutral" 
-                    
+                    current_emotion = "neutral"
+
+                    # 2文前後をひと塊にしてTTSへ投げるバッファ
+                    buffered_text = ""
+                    buffered_sentence_count = 0
+                    buffered_emotion = current_emotion
+                    buffered_command = None
+
+                    # 並列TTSタスクの順番保証キュー
+                    pending_tts_tasks = {}
+                    next_segment_index = 0
+                    next_send_index = 0
+
+                    async def dispatch_segment(text: str, emotion: str, command):
+                        nonlocal next_segment_index
+                        cleaned = text.strip()
+                        if not cleaned:
+                            return
+                        idx = next_segment_index
+                        next_segment_index += 1
+                        custom_log("INFO  ", "GEMINI", f"発話セグメントの生成 ({emotion}): {cleaned}")
+                        if command:
+                            custom_log("INFO  ", "SYSTEM", f"メタコマンドの抽出成功: {command['key']} -> {command['value']}")
+                        pending_tts_tasks[idx] = {
+                            "task": asyncio.create_task(
+                                generate_cloud_audio(
+                                    cleaned,
+                                    config.system_settings["voice"],
+                                    config.system_settings["rate"],
+                                    config.system_settings["pitch"],
+                                )
+                            ),
+                            "text": cleaned,
+                            "emotion": emotion,
+                            "command": command,
+                        }
+
+                    async def flush_buffered_segment():
+                        nonlocal buffered_text, buffered_sentence_count, buffered_emotion, buffered_command
+                        await dispatch_segment(buffered_text, buffered_emotion, buffered_command)
+                        buffered_text = ""
+                        buffered_sentence_count = 0
+                        buffered_command = None
+
+                    async def try_send_ready_segments():
+                        nonlocal next_send_index
+                        while next_send_index in pending_tts_tasks:
+                            entry = pending_tts_tasks[next_send_index]
+                            task = entry["task"]
+                            if not task.done():
+                                break
+                            mp3_data = await task
+                            if mp3_data:
+                                b64_audio = base64.b64encode(mp3_data).decode('utf-8')
+                                await websocket.send_json({
+                                    "type": "audio",
+                                    "audio": b64_audio,
+                                    "text": entry["text"],
+                                    "emotion": entry["emotion"],
+                                    "command": entry["command"],
+                                })
+                            del pending_tts_tasks[next_send_index]
+                            next_send_index += 1
+
                     for chunk in response:
                         tensor_chunk = chunk.text
                         if tensor_chunk:
                             sentence += tensor_chunk
-                            if any(p in tensor_chunk for p in ["。", "！", "？", "\n"]):
+                            if any(p in tensor_chunk for p in SENTENCE_DELIMITERS):
                                 raw_sentence = sentence.strip()
                                 if raw_sentence:
                                     match_emo = re.search(r'\[emotion:(.*?)\]', raw_sentence)
+                                    sentence_emotion = current_emotion
                                     if match_emo:
-                                        current_emotion = match_emo.group(1)
+                                        sentence_emotion = match_emo.group(1)
                                         raw_sentence = re.sub(r'\[emotion:.*?\]', '', raw_sentence).strip()
                                     
-                                    cmd_data = None
+                                    sentence_command = None
                                     match_cmd = re.search(r'\[command:(.*?)=(.*?)\]', raw_sentence)
                                     if match_cmd:
-                                        cmd_data = {"key": match_cmd.group(1), "value": match_cmd.group(2)}
+                                        sentence_command = {"key": match_cmd.group(1), "value": match_cmd.group(2)}
                                         raw_sentence = re.sub(r'\[command:.*?\]', '', raw_sentence).strip()
 
                                     if raw_sentence:
-                                        custom_log("INFO  ", "GEMINI", f"発話セグメントの生成 ({current_emotion}): {raw_sentence}")
-                                        if cmd_data:
-                                            custom_log("INFO  ", "SYSTEM", f"メタコマンドの抽出成功: {cmd_data['key']} -> {cmd_data['value']}")
-                                            
-                                        mp3_data = await generate_cloud_audio(raw_sentence, config.system_settings["voice"], config.system_settings["rate"], config.system_settings["pitch"])
-                                        if mp3_data:
-                                            b64_audio = base64.b64encode(mp3_data).decode('utf-8')
-                                            await websocket.send_json({
-                                                "type": "audio", "audio": b64_audio, "text": raw_sentence, "emotion": current_emotion, "command": cmd_data  
-                                            })
+                                        # 感情またはコマンドの切替タイミングでまずフラッシュ
+                                        emotion_switched = buffered_sentence_count > 0 and sentence_emotion != buffered_emotion
+                                        command_switched = buffered_sentence_count > 0 and sentence_command != buffered_command
+                                        if emotion_switched or command_switched:
+                                            await flush_buffered_segment()
+                                            await try_send_ready_segments()
+
+                                        if buffered_sentence_count == 0:
+                                            buffered_emotion = sentence_emotion
+                                            buffered_command = sentence_command
+
+                                        if buffered_text:
+                                            buffered_text += raw_sentence
+                                        else:
+                                            buffered_text = raw_sentence
+                                        buffered_sentence_count += 1
+                                        current_emotion = sentence_emotion
+
+                                        # 2文、または約50文字でセグメント確定
+                                        if buffered_sentence_count >= 2 or len(buffered_text) >= 50:
+                                            await flush_buffered_segment()
+                                            await try_send_ready_segments()
                                 sentence = ""
+
+                    # 句読点で閉じなかった残りを確定
+                    if sentence.strip():
+                        raw_sentence = sentence.strip()
+                        match_emo = re.search(r'\[emotion:(.*?)\]', raw_sentence)
+                        sentence_emotion = current_emotion
+                        if match_emo:
+                            sentence_emotion = match_emo.group(1)
+                            raw_sentence = re.sub(r'\[emotion:.*?\]', '', raw_sentence).strip()
+                        sentence_command = None
+                        match_cmd = re.search(r'\[command:(.*?)=(.*?)\]', raw_sentence)
+                        if match_cmd:
+                            sentence_command = {"key": match_cmd.group(1), "value": match_cmd.group(2)}
+                            raw_sentence = re.sub(r'\[command:.*?\]', '', raw_sentence).strip()
+
+                        if raw_sentence:
+                            emotion_switched = buffered_sentence_count > 0 and sentence_emotion != buffered_emotion
+                            command_switched = buffered_sentence_count > 0 and sentence_command != buffered_command
+                            if emotion_switched or command_switched:
+                                await flush_buffered_segment()
+                                await try_send_ready_segments()
+                            if buffered_sentence_count == 0:
+                                buffered_emotion = sentence_emotion
+                                buffered_command = sentence_command
+                            if buffered_text:
+                                buffered_text += raw_sentence
+                            else:
+                                buffered_text = raw_sentence
+                            buffered_sentence_count += 1
+
+                    # 未送信バッファを最終フラッシュ
+                    if buffered_sentence_count > 0:
+                        await flush_buffered_segment()
+
+                    # 生成済みタスクを順番通りに送信完了まで待つ
+                    while next_send_index < next_segment_index:
+                        if next_send_index in pending_tts_tasks:
+                            entry = pending_tts_tasks[next_send_index]
+                            mp3_data = await entry["task"]
+                            if mp3_data:
+                                b64_audio = base64.b64encode(mp3_data).decode('utf-8')
+                                await websocket.send_json({
+                                    "type": "audio",
+                                    "audio": b64_audio,
+                                    "text": entry["text"],
+                                    "emotion": entry["emotion"],
+                                    "command": entry["command"],
+                                })
+                            del pending_tts_tasks[next_send_index]
+                            next_send_index += 1
                 except Exception as stream_err:
                     custom_log("ERROR ", "GEMINI", f"Geminiストリーム接続の完全切断: {stream_err}")
                     fallback_text = "ごめんね、ちょっと電波が届かなくなっちゃったみたい！もう一回言ってくれる？"
@@ -224,3 +489,5 @@ app.mount("/", StaticFiles(directory="static", html=True), name="static")
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
+
+

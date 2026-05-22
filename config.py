@@ -4,6 +4,7 @@ import asyncio
 # --- API構成 ---
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 DETECTION_COOLDOWN_SEC = 40
+AUTO_GREETING_IDLE_GRACE_SEC = 8
 
 # --- グローバル状態（スレッド安全・非同期対応） ---
 active_websocket = None
@@ -12,6 +13,9 @@ current_camera_id = 0
 main_loop = None
 camera_thread_started = False
 is_interacting = False  # 能動的な対話（ユーザー発話、AI応答・再生）が動いている間は True
+last_user_activity_time = 0
+latest_camera_frame_b64 = None
+latest_camera_frame_ts = 0
 
 # アバターの同期用設定
 system_settings = {

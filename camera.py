@@ -111,14 +111,18 @@ class CameraSensor:
                         small_preview = cv2.resize(preview_frame, (320, int(320 * h / w)))
                         _, pre_buf = cv2.imencode('.jpg', small_preview, [int(cv2.IMWRITE_JPEG_QUALITY), 70])
                         pre_b64 = base64.b64encode(pre_buf).decode('utf-8')
+                        config.latest_camera_frame_b64 = pre_b64
+                        config.latest_camera_frame_ts = time.monotonic()
                         asyncio.run_coroutine_threadsafe(
                             config.active_websocket.send_json({"type": "camera_preview", "image": pre_b64}), config.main_loop
                         )
                     except Exception:
                         pass
 
-            now = time.time()
-            if consecutive_face_frames >= 3 and (now - config.last_greeting_time > config.DETECTION_COOLDOWN_SEC):
+            now = time.monotonic()
+            is_after_cooldown = now - config.last_greeting_time > config.DETECTION_COOLDOWN_SEC
+            is_user_idle_enough = now - config.last_user_activity_time > config.AUTO_GREETING_IDLE_GRACE_SEC
+            if consecutive_face_frames >= 3 and is_after_cooldown and is_user_idle_enough:
                 if target_face_bbox is not None:
                     config.last_greeting_time = now
                     consecutive_face_frames = 0
@@ -132,9 +136,9 @@ class CameraSensor:
                                 if name in self.TARGET_MAP:
                                     detected_objects.add(self.TARGET_MAP[name])
 
-                    objects_str = "、".join(detected_objects) if detected_objects else "特なし"
+                    objects_str = "、".join(detected_objects) if detected_objects else "特になし"
                     local_features = f"物理距離: {proximity_status} / 持ち物: [{objects_str}]"
-                    custom_log("INFO  ", "CAMERA", f"空間情報の変化看破 ({local_features})")
+                    custom_log(" INFO ", "CAMERA", f"空間情報の変化看破 ({local_features})")
 
                     if config.main_loop:
                         asyncio.run_coroutine_threadsafe(self._process_spontaneous_greeting(local_features), config.main_loop)
@@ -153,7 +157,7 @@ class CameraSensor:
             config.is_interacting = True
             prompt = (
                 f"指示: 冒頭に必ず [emotion:感情名] を付けて、正面に立った新規ゲスト({local_features})に対して、"
-                f"キャラクター『ソラ』のフランクなタメ口トーンで、30文字前後で1文の歓迎お迎え文をつぶやいて。"
+                f"キャラクター『ソラ』のフランクなトーンで、20文字前後で1文の歓迎お迎え文をつぶやいて。"
             )
             
             try:

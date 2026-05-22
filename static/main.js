@@ -21,6 +21,53 @@ let isOptionsOpen = false;
 let idleTimer = null;
 let isVisualParamChanged = false; 
 let isPendingSettingsSync = false;
+let waitingPromptEl = null;
+let cameraOptionsMeta = [];
+
+function guessCameraType(label = "") {
+    const l = (label || "").toLowerCase();
+    if (l.includes("usb") || l.includes("webcam") || l.includes("external")) return "usb";
+    if (l.includes("integrated") || l.includes("internal") || l.includes("built-in") || l.includes("builtin")) return "internal";
+    return "unknown";
+}
+
+async function refreshCameraOptions(requestPermission = false) {
+    const cameraSelect = document.getElementById('param-camera');
+    if (!cameraSelect || !navigator.mediaDevices?.enumerateDevices) return;
+
+    let stream = null;
+    try {
+        if (requestPermission) {
+            stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+        }
+        const devices = await navigator.mediaDevices.enumerateDevices();
+        const cameras = devices.filter((d) => d.kind === "videoinput");
+        if (cameras.length === 0) return;
+
+        const previousValue = cameraSelect.value;
+        cameraOptionsMeta = cameras.map((cam, idx) => ({
+            index: idx,
+            label: cam.label || `Camera ${idx}`,
+            type: guessCameraType(cam.label || ""),
+        }));
+
+        cameraSelect.innerHTML = "";
+        cameraOptionsMeta.forEach((cam) => {
+            const option = document.createElement("option");
+            option.value = String(cam.index);
+            const typeLabel = cam.type === "usb" ? "USB" : (cam.type === "internal" ? "Internal" : "Unknown");
+            option.textContent = `Camera ${cam.index} (${typeLabel}: ${cam.label})`;
+            cameraSelect.appendChild(option);
+        });
+
+        if ([...cameraSelect.options].some((o) => o.value === previousValue)) cameraSelect.value = previousValue;
+        else cameraSelect.value = "0";
+    } catch (e) {
+        console.warn("camera list refresh failed:", e);
+    } finally {
+        if (stream) stream.getTracks().forEach((t) => t.stop());
+    }
+}
 
 function connectWebSocket() {
     console.log("【通信管理】WebSocket 接続要求を開始します...");
@@ -116,6 +163,7 @@ function activateSystem() {
     }
     
     sendSettingsToServer();
+    refreshCameraOptions(true);
     isAiTurn = false; 
     startListening();
     resetIdleTimer(); 
@@ -138,6 +186,7 @@ function toggleOptionsWindow() {
     if (!isOptionsOpen) {
         isOptionsOpen = true;
         optionsOverlay.style.display = 'block';
+        refreshCameraOptions(false);
         try { recognition.stop(); } catch(e){}
         isRecognitionActive = false;
         micIndicator.style.display = 'none';
@@ -182,10 +231,30 @@ function sendSettingsToServer() {
 
 function appendMessage(role, text) {
     if (!isStarted && role !== 'status') return null;
+
+    if (role === 'status') {
+        if (!waitingPromptEl || !waitingPromptEl.isConnected) {
+            waitingPromptEl = document.createElement('div');
+            waitingPromptEl.className = 'msg-status';
+            chatLog.appendChild(waitingPromptEl);
+        }
+        waitingPromptEl.innerText = text;
+        chatLog.appendChild(waitingPromptEl); // always keep at latest (bottom)
+        chatLog.scrollTop = chatLog.scrollHeight;
+        return waitingPromptEl;
+    }
+
+    // Keep waiting prompt only at the latest idle state, never between conversations.
+    if (waitingPromptEl && waitingPromptEl.isConnected) {
+        waitingPromptEl.remove();
+        waitingPromptEl = null;
+    }
+
+    document.querySelectorAll('.msg-status').forEach((el) => el.remove());
+
     const msgDiv = document.createElement('div');
     if (role === 'user') msgDiv.className = 'msg-user';
     else if (role === 'ai') msgDiv.className = 'msg-ai';
-    else if (role === 'status') msgDiv.className = 'msg-status'; 
     msgDiv.innerText = text;
     chatLog.appendChild(msgDiv);
     chatLog.scrollTop = chatLog.scrollHeight;
@@ -250,7 +319,20 @@ function executeVoiceCommand(cmd) {
     }
     else if (cmd.key === "camera") {
         const cameraSelect = document.getElementById('param-camera');
-        cameraSelect.value = (cameraSelect.value === '0') ? '1' : '0';
+        const value = String(cmd.value || "").toUpperCase();
+        if (value === "TOGGLE") {
+            const current = parseInt(cameraSelect.value || "0", 10);
+            const next = cameraOptionsMeta.length > 1 ? (current + 1) % cameraOptionsMeta.length : (current === 0 ? 1 : 0);
+            cameraSelect.value = String(next);
+        } else if (value === "INTERNAL") {
+            const target = cameraOptionsMeta.find((c) => c.type === "internal");
+            if (target) cameraSelect.value = String(target.index);
+        } else if (value === "USB") {
+            const target = cameraOptionsMeta.find((c) => c.type === "usb");
+            if (target) cameraSelect.value = String(target.index);
+        } else if (/^\d+$/.test(value)) {
+            cameraSelect.value = value;
+        }
         cameraSelect.dispatchEvent(new Event('change')); 
     }
     else if (cmd.key === "rate") {
@@ -418,3 +500,4 @@ function initTextInputForm() {
     document.body.appendChild(formContainer);
 }
 window.addEventListener('DOMContentLoaded', initTextInputForm);
+window.addEventListener('DOMContentLoaded', () => { refreshCameraOptions(false); });

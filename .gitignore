@@ -1,26 +1,48 @@
-# Pythonの仮想環境フォルダを除外
+﻿# ---- Python virtual environments ----
 venv/
 .venv/
+env/
 
-# Webへのショートカットファイルを除外
-# (Windowsのインターネットショートカットやリンクファイル、Macのwebloc)
-*.url
+# ---- Python bytecode / caches ----
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# ---- Build / packaging artifacts ----
+build/
+dist/
+*.egg-info/
+.eggs/
+pip-wheel-metadata/
+
+# ---- Jupyter ----
+.ipynb_checkpoints/
+
+# ---- IDE / editor ----
+.vscode/
+.idea/
+
+# ---- OS / shortcuts ----
+.DS_Store
+Thumbs.db
 *.lnk
+*.url
 *.webloc
 
-# Caffeのプロトタイプファイルを除外
-.prototxt
-.caffemodel
-# Jupyter Notebookのチェックポイントファイルを除外
-.ipynb_checkpoints/
-# VSCodeの設定ファイルを除外
-.vscode/
-# PyCharmの設定ファイルを除外
-.idea/
-# MacのDS_Storeファイルを除外
-.DS_Store
+# ---- Local environment files ----
+.env
+.env.*
 
-# Pythonのキャッシュファイルを除外
-__pycache__/
-*.pyc
+# ---- Logs / temp ----
+*.log
+*.tmp
 
+# ---- Model files (downloaded locally) ----
+*.prototxt
+*.caffemodel

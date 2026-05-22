@@ -53,12 +53,33 @@ body {
     padding: 60px;
     display: flex;
     flex-direction: column;
-    justify-content: flex-end; 
+    /* justify-content: flex-end; */ /* ← 【重要】スクロールを破壊していた原因のため削除 */
     overflow-y: auto;
-    -ms-overflow-style: none;
-    scrollbar-width: none;
+    
+    /* Windows/Linux環境向けの標準スクロールバー設定（サイバーカラーに馴染む極細ライン） */
+    scrollbar-width: thin;
+    scrollbar-color: #00ffcc #000000;
 }
-#chat-log::-webkit-scrollbar { display: none; }
+
+/* 最初のメッセージの上部に自動マージンをかけることで、 */
+/* 会話が少ないときでもスクロールをバグらせずに、メッセージを綺麗に「下寄せ」に維持します */
+#chat-log > :first-child {
+    margin-top: auto !important;
+}
+
+/* スクロールバーの非表示（display: none）を解除し、世界観に合わせたネオンデザインにカスタム */
+#chat-log::-webkit-scrollbar {
+    display: block; 
+    width: 6px; /* 画面を邪魔しない極細仕様 */
+}
+#chat-log::-webkit-scrollbar-track {
+    background: #000000;
+}
+#chat-log::-webkit-scrollbar-thumb {
+    background: #00ffcc;
+    border-radius: 3px;
+    box-shadow: 0 0 10px rgba(0, 255, 204, 0.6);
+}
 
 .msg-user { 
     font-size: 56px; 

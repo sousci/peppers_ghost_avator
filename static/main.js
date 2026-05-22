@@ -1,4 +1,4 @@
-const ws = new WebSocket('ws://localhost:8000/ws');
+let ws = null;
 let audioCtx = null;
 let audioQueue = [];        
 let isPlayingAudio = false;  
@@ -20,6 +20,60 @@ let isStarted = false;
 let isOptionsOpen = false; 
 let idleTimer = null;
 let isVisualParamChanged = false; 
+let isPendingSettingsSync = false;
+
+function connectWebSocket() {
+    console.log("【通信管理】WebSocket 接続要求を開始します...");
+    ws = new WebSocket('ws://localhost:8000/ws');
+
+    ws.onopen = () => {
+        console.log("【通信管理】FastAPI バックエンドとのパイプライン接続に成功しました。");
+        if (isStarted) { sendSettingsToServer(); }
+    };
+
+    ws.onmessage = async (event) => {
+        if (!isStarted) return;
+        const msg = JSON.parse(event.data);
+        
+        if (msg.type === "camera_preview") {
+            const previewImg = document.getElementById('camera-preview');
+            if (previewImg) {
+                previewImg.style.display = 'block';
+                previewImg.src = 'data:image/jpeg;base64,' + msg.image;
+            }
+            return;
+        }
+
+        if (msg.type === "audio") {
+            stopIdleTimer(); 
+            let rawText = msg.text;
+            let emotion = msg.emotion || 'neutral';
+            
+            const match = rawText.match(/\[emotion:(.*?)\]/);
+            if (match) {
+                emotion = match[1];
+                rawText = rawText.replace(/\[emotion:.*?\]/, "");
+            }
+
+            if (msg.command) { executeVoiceCommand(msg.command); }
+
+            audioQueue.push({ bufferArray: bytesToBuffer(msg.audio), text: rawText, emotion: emotion });
+            if (!isPlayingAudio) playNextInQueue();
+        }
+    };
+
+    ws.onclose = (e) => {
+        console.warn("【通信管理】WebSocket 切断を検知しました。3秒後に自動再接続を試みます...", e.reason);
+        stopIdleTimer();
+        setTimeout(connectWebSocket, 3000); 
+    };
+
+    ws.onerror = (err) => {
+        console.error("【通信管理】WebSocket 内部エラーが発生しました:", err);
+    };
+}
+
+connectWebSocket();
 
 function resetIdleTimer() {
     stopIdleTimer();
@@ -37,15 +91,14 @@ function resetIdleTimer() {
         try { recognition.stop(); } catch(e){}
         isRecognitionActive = false;
         micIndicator.style.display = 'none';
-        ws.send(JSON.stringify({ type: "idle_soliloquy" }));
+        if (ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: "idle_soliloquy" }));
+        }
     }, dynamicTimeout);
 }
 
 function stopIdleTimer() {
-    if (idleTimer) {
-        clearTimeout(idleTimer);
-        idleTimer = null;
-    }
+    if (idleTimer) { clearTimeout(idleTimer); idleTimer = null; }
 }
 
 function activateSystem() {
@@ -56,9 +109,11 @@ function activateSystem() {
     
     isStarted = true;
     chatLog.innerHTML = "";
-    appendMessage('status', "何か 話しかけてください...");
+    appendMessage('status', "何か 話しかけるか、下のフォームから文字を入力してください...");
     
-    ws.send(JSON.stringify({ type: "start_system" }));
+    if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: "start_system" }));
+    }
     
     sendSettingsToServer();
     isAiTurn = false; 
@@ -94,7 +149,9 @@ function toggleOptionsWindow() {
         sendSettingsToServer();
         if (isStarted) {
             isAiTurn = true; 
-            ws.send(JSON.stringify({ type: "settings_changed" }));
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ type: "settings_changed" }));
+            }
         } else {
             startListening();
         }
@@ -103,7 +160,13 @@ function toggleOptionsWindow() {
 }
 
 function sendSettingsToServer() {
-    if (ws.readyState !== WebSocket.OPEN) return;
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+
+    if (isAiTurn || isPlayingAudio || window.isSpeaking) {
+        isPendingSettingsSync = true;
+        console.log("【通信防衛】AIが発話中のため、サーバーへの設定同期パケットを一時保留しました。");
+        return;
+    }
 
     const vRate = (parseInt(document.getElementById('param-rate').value) >= 0 ? "+" : "") + document.getElementById('param-rate').value + "%";
     const vPitch = (parseInt(document.getElementById('param-pitch').value) >= 0 ? "+" : "") + document.getElementById('param-pitch').value + "Hz";
@@ -112,13 +175,7 @@ function sendSettingsToServer() {
     const vCamera = parseInt(document.getElementById('param-camera').value);
 
     ws.send(JSON.stringify({
-        type: "settings",
-        voice: vVoice,
-        rate: vRate,
-        pitch: vPitch,
-        mirror: vMirror,
-        camera: vCamera,
-        visual_changed: isVisualParamChanged 
+        type: "settings", voice: vVoice, rate: vRate, pitch: vPitch, mirror: vMirror, camera: vCamera, visual_changed: isVisualParamChanged 
     }));
     isVisualParamChanged = false; 
 }
@@ -144,10 +201,7 @@ function startListening() {
 }
 
 recognition.onstart = () => {
-    if (!isStarted || isOptionsOpen) {
-        try { recognition.stop(); } catch(e){}
-        return;
-    }
+    if (!isStarted || isOptionsOpen) { try { recognition.stop(); } catch(e){} return; }
     isRecognitionActive = true;
     micIndicator.style.display = 'block'; 
 };
@@ -161,40 +215,54 @@ recognition.onresult = (event) => {
     isRecognitionActive = false;
     micIndicator.style.display = 'none'; 
     stopIdleTimer(); 
-    ws.send(JSON.stringify({ type: "text", text: speechText }));
+    if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: "text", text: speechText }));
+    }
 };
 
 recognition.onerror = (event) => {
-    isRecognitionActive = false;
-    micIndicator.style.display = 'none';
-    resetIdleTimer();
+    isRecognitionActive = false; micIndicator.style.display = 'none'; resetIdleTimer();
 };
 
 recognition.onend = () => {
-    isRecognitionActive = false;
-    micIndicator.style.display = 'none'; 
+    isRecognitionActive = false; micIndicator.style.display = 'none'; 
     if (isStarted && !isAiTurn && !window.isSpeaking && !isOptionsOpen) startListening();
 };
 
-ws.onmessage = async (event) => {
-    if (!isStarted) return;
-    const msg = JSON.parse(event.data);
-    
-    if (msg.type === "camera_preview") {
-        const previewImg = document.getElementById('camera-preview');
-        if (previewImg) {
-            previewImg.style.display = 'block';
-            previewImg.src = 'data:image/jpeg;base64,' + msg.image;
-        }
-        return;
-    }
+function executeVoiceCommand(cmd) {
+    if (!cmd || !cmd.key) return;
+    console.log(`【フロントコマンド実行】Key: ${cmd.key} / Value: ${cmd.value}`);
 
-    if (msg.type === "audio") {
-        stopIdleTimer(); 
-        audioQueue.push({ bufferArray: bytesToBuffer(msg.audio), text: msg.text });
-        if (!isPlayingAudio) playNextInQueue();
+    if (cmd.key === "scale") {
+        const scaleInput = document.getElementById('param-vrm-scale');
+        let currentScale = parseFloat(scaleInput.value);
+        if (cmd.value === "UP") currentScale = Math.min(currentScale + 0.15, 2.0);
+        else if (cmd.value === "DOWN") currentScale = Math.max(currentScale - 0.15, 0.5);
+        scaleInput.value = currentScale;
+        scaleInput.dispatchEvent(new Event('input')); 
     }
-};
+    else if (cmd.key === "mirror") {
+        const mirrorSelect = document.getElementById('param-mirror');
+        mirrorSelect.value = (mirrorSelect.value === 'true') ? 'false' : 'true';
+        if (mirrorSelect.value === 'true') document.body.style.transform = 'scaleX(-1)';
+        else document.body.style.transform = 'none';
+        sendSettingsToServer(); 
+    }
+    else if (cmd.key === "camera") {
+        const cameraSelect = document.getElementById('param-camera');
+        cameraSelect.value = (cameraSelect.value === '0') ? '1' : '0';
+        cameraSelect.dispatchEvent(new Event('change')); 
+    }
+    else if (cmd.key === "rate") {
+        const rateInput = document.getElementById('param-rate');
+        let currentRate = parseInt(rateInput.value);
+        if (cmd.value === "FASTER") currentRate = Math.min(currentRate + 25, 100);
+        else if (cmd.value === "SLOWER") currentRate = Math.max(currentRate - 25, -50);
+        rateInput.value = currentRate;
+        rateInput.dispatchEvent(new Event('input'));  
+        rateInput.dispatchEvent(new Event('change')); 
+    }
+}
 
 function bytesToBuffer(base64Str) {
     const binaryString = window.atob(base64Str);
@@ -209,17 +277,37 @@ async function playNextInQueue() {
     if (audioQueue.length === 0) {
         isPlayingAudio = false; window.isSpeaking = false; isAiTurn = false; 
         appendMessage('status', "何か 話しかけてください...");
+        if (window.playMotion) window.playMotion('neutral');
+
+        if (ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: "end_interaction" }));
+        }
+
+        if (isPendingSettingsSync) {
+            isPendingSettingsSync = false;
+            console.log("【通信回収】安全待機状態への遷移に伴い、保留設定をサーバーへ一括クリーン同期します。");
+            sendSettingsToServer();
+        }
+
         startListening(); resetIdleTimer(); 
         return;
     }
     isPlayingAudio = true; window.isSpeaking = true; 
     const currentItem = audioQueue.shift();
     appendMessage('ai', currentItem.text); 
+    if (window.playMotion) { window.playMotion(currentItem.emotion); }
+
     try {
         const audioBuffer = await audioCtx.decodeAudioData(currentItem.bufferArray);
         const source = audioCtx.createBufferSource();
         source.buffer = audioBuffer;
-        source.connect(audioCtx.destination);
+
+        if (!window.audioAnalyser) {
+            window.audioAnalyser = audioCtx.createAnalyser();
+            window.audioAnalyser.fftSize = 32; 
+        }
+        source.connect(window.audioAnalyser);
+        window.audioAnalyser.connect(audioCtx.destination);
         source.onended = () => { playNextInQueue(); };
         source.start(0);
     } catch (e) { playNextInQueue(); }
@@ -244,19 +332,16 @@ const pVrmX = document.getElementById('param-vrm-x');
 const pVrmY = document.getElementById('param-vrm-y');
 const pVrmScale = document.getElementById('param-vrm-scale');
 pVrmX.addEventListener('input', (e) => {
-    const val = parseFloat(e.target.value);
-    document.getElementById('val-vrm-x').innerText = val.toFixed(2);
+    const val = parseFloat(e.target.value); document.getElementById('val-vrm-x').innerText = val.toFixed(2);
     if (window.currentVrm) window.currentVrm.scene.position.x = val;
     isVisualParamChanged = true; 
 });
 pVrmY.addEventListener('input', (e) => {
-    const val = parseFloat(e.target.value);
-    document.getElementById('val-vrm-y').innerText = val.toFixed(2);
+    const val = parseFloat(e.target.value); document.getElementById('val-vrm-y').innerText = val.toFixed(2);
     isVisualParamChanged = true;
 });
 pVrmScale.addEventListener('input', (e) => {
-    const val = parseFloat(e.target.value);
-    document.getElementById('val-vrm-scale').innerText = val.toFixed(2);
+    const val = parseFloat(e.target.value); document.getElementById('val-vrm-scale').innerText = val.toFixed(2);
     if (window.currentVrm) window.currentVrm.scene.scale.set(val, val, val);
     isVisualParamChanged = true;
 });
@@ -266,7 +351,6 @@ document.getElementById('param-mirror').addEventListener('change', (e) => {
     else document.body.style.transform = 'none';
     sendSettingsToServer(); 
 });
-
 document.getElementById('param-camera').addEventListener('change', () => { sendSettingsToServer(); });
 document.getElementById('param-rate').addEventListener('change', () => { sendSettingsToServer(); });
 document.getElementById('param-pitch').addEventListener('change', () => { sendSettingsToServer(); });
@@ -278,3 +362,59 @@ document.getElementById('param-rate').addEventListener('input', (e) => {
 document.getElementById('param-pitch').addEventListener('input', (e) => {
     document.getElementById('val-pitch').innerText = (parseInt(e.target.value) >= 0 ? "+" : "") + e.target.value + "Hz";
 });
+
+function initTextInputForm() {
+    const formContainer = document.createElement('div');
+    formContainer.id = 'debug-text-input-container';
+    // 【修正ポイント】bottomを 15px から 60px へ引き上げ調整完了！
+    formContainer.style.cssText = `
+        position: fixed; bottom: 60px; left: 50%; transform: translateX(-50%);
+        display: flex; gap: 8px; width: 85%; max-width: 480px; z-index: 9999;
+        box-sizing: border-box; transition: opacity 0.3s;
+    `;
+
+    const inputField = document.createElement('input');
+    inputField.type = 'text'; inputField.id = 'param-text-input';
+    inputField.placeholder = 'ソラへキーボードからメッセージを入力...';
+    inputField.style.cssText = `
+        flex: 1; padding: 10px 14px; background: rgba(0, 0, 0, 0.75);
+        border: 1px solid #00ffcc; color: #ffffff; border-radius: 6px;
+        font-size: 14px; outline: none; font-family: sans-serif;
+        box-shadow: 0 0 10px rgba(0, 255, 204, 0.2); transition: all 0.2s;
+    `;
+    inputField.onfocus = () => { inputField.style.boxShadow = '0 0 15px rgba(0, 255, 204, 0.5)'; };
+    inputField.onblur = () => { inputField.style.boxShadow = '0 0 10px rgba(0, 255, 204, 0.2)'; };
+
+    const sendButton = document.createElement('button');
+    sendButton.id = 'send-txt-btn'; sendButton.innerText = '送信';
+    sendButton.style.cssText = `
+        padding: 0 18px; background: #00ffcc; border: none; color: #000000;
+        font-weight: bold; border-radius: 6px; font-size: 14px; cursor: pointer;
+        box-shadow: 0 0 10px rgba(0, 255, 204, 0.4); transition: background 0.2s;
+    `;
+    sendButton.onmouseover = () => { sendButton.style.background = '#00e6b8'; };
+    sendButton.onmouseout = () => { sendButton.style.background = '#00ffcc'; };
+
+    const handleSend = () => {
+        if (!isStarted) { activateSystem(); return; }
+        const textValue = inputField.value.trim();
+        if (!textValue) return;
+
+        appendMessage('user', `あなた: ${textValue}`);
+        isAiTurn = true;
+        try { recognition.stop(); } catch(e){}
+        isRecognitionActive = false; micIndicator.style.display = 'none'; stopIdleTimer();
+
+        if (ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: "text", text: textValue }));
+        }
+        inputField.value = ''; 
+    };
+
+    sendButton.addEventListener('click', handleSend);
+    inputField.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); handleSend(); } });
+
+    formContainer.appendChild(inputField); formContainer.appendChild(sendButton);
+    document.body.appendChild(formContainer);
+}
+window.addEventListener('DOMContentLoaded', initTextInputForm);

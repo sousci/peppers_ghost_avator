@@ -11,6 +11,7 @@ last_greeting_time = 0
 current_camera_id = 0
 main_loop = None
 camera_thread_started = False
+is_interacting = False  # 能動的な対話（ユーザー発話、AI応答・再生）が動いている間は True
 
 # アバターの同期用設定
 system_settings = {

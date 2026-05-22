@@ -2,9 +2,43 @@ import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { VRMLoaderPlugin } from '@pixiv/three-vrm';
 
-// 他ファイル（main.js）から参照するグローバルバインド
+// =========================================================================
+// 🎛️ チューニング用パラメータ集約エリア（ここを調整するだけで挙動が変わります）
+// =========================================================================
+const LIP_SYNC_CONFIG = {
+    minVolume: 0.03,         // リップシンクが反応し始める最小音量閾値
+    speedAA: 14,             // 「あ」の口の動く速さ（テンポ）
+    speedEE: 11,             // 「い/え」の口の動く速さ
+    speedOO: 8,              // 「う/お」の口の動く速さ
+
+    // 通常時（neutral, sad, angry, surprised）の口の開き具合
+    neutral: {
+        maxOpen: 0.70,       // 口の最大開き幅（アゴ外れ防止のため0.85以下推奨）
+        aaGain: 0.35,        // 「あ」のブレンド最大強度
+        eeGain: 0.20,        // 「え」のブレンド最大強度
+        ooGain: 0.15         // 「お」のブレンド最大強度
+    },
+    // 笑顔時（happy）の口の開き具合（ご指摘の「開きすぎ・バッティング違和感」の特化調整エリア）
+    happy: {
+        maxOpen: 0.25,       // 笑顔の原型を崩さないよう、口の開き幅を極小にロック
+        aaGain: 0.10,        // 笑顔用「あ」の最大強度
+        eeGain: 0.06,        // 笑顔用「え」の最大強度
+        ooGain: 0.05         // 笑顔用「お」の最大強度
+    }
+};
+
+const EXPRESSION_CONFIG = {
+    happy:     { weightSpeaking: 1.0, keepEyes: true },  // 笑顔時は喋っていても「にっこり目」を1.0で完全固定
+    sad:       { weightSpeaking: 0.6, keepEyes: false }, // 笑顔以外は、リップシンクを綺麗に見せるため
+    angry:     { weightSpeaking: 0.6, keepEyes: false }, // 喋っている間だけ表情の重みをマイルドに減衰
+    surprised: { weightSpeaking: 0.6, keepEyes: false }
+};
+// =========================================================================
+
+// 他ファイルから参照するグローバルバインド
 window.currentVrm = undefined;
 window.isSpeaking = false;
+window.currentVrmEmotionName = 'neutral';
 
 const container = document.getElementById('canvas-container');
 const scene = new THREE.Scene();
@@ -26,9 +60,35 @@ const directionalLight = new THREE.DirectionalLight(0xfffbea, 1.0);
 directionalLight.position.set(1.0, 1.0, 1.0).normalize();
 scene.add(directionalLight);
 
+const EMOTION_POSES = {
+    neutral:   { armLz: 1.3,  armLx: 0.1,  armRz: -1.3,  armRx: 0.1,  shoulderZ: 0.0,  headX: 0.0 },
+    happy:     { armLz: 0.8,  armLx: 0.4,  armRz: -0.8,  armRx: 0.4,  shoulderZ: -0.04, headX: -0.06 }, 
+    sad:       { armLz: 1.45, armLx: 0.0,  armRz: -1.45, armRx: 0.0,  shoulderZ: 0.06,  headX: 0.18 },  
+    angry:     { armLz: 1.15, armLx: -0.1, armRz: -1.15, armRx: -0.1, shoulderZ: -0.08, headX: 0.06 },  
+    surprised: { armLz: 0.4,  armLx: 0.6,  armRz: -0.4,  armRx: 0.6,  shoulderZ: -0.05, headX: -0.12 }  
+};
+
+let currentPose = { ...EMOTION_POSES.neutral };
+let targetPose  = { ...EMOTION_POSES.neutral };
+
+window.playMotion = (emotion) => {
+    if (EMOTION_POSES[emotion]) {
+        targetPose = EMOTION_POSES[emotion];
+        window.currentVrmEmotionName = emotion;
+        
+        if (window.currentVrm && window.currentVrm.expressionManager) {
+            const expressionNames = ['happy', 'sad', 'angry', 'surprised'];
+            if (emotion === 'neutral') {
+                expressionNames.forEach(exp => window.currentVrm.expressionManager.setValue(exp, 0));
+            } else if (expressionNames.includes(emotion)) {
+                window.currentVrm.expressionManager.setValue(emotion, 1.0);
+            }
+        }
+    }
+};
+
 const loader = new GLTFLoader();
 loader.register((parser) => new VRMLoaderPlugin(parser));
-
 const vrmPath = './7151938431140058353.vrm'; 
 
 loader.load(vrmPath, (gltf) => {
@@ -39,7 +99,6 @@ loader.load(vrmPath, (gltf) => {
     vrm.scene.position.x = 0.0; 
     vrm.scene.scale.set(1.18, 1.18, 1.18); 
     vrm.scene.position.y = -0.15; 
-    
     document.getElementById('system-status').innerText = "システム起動準備完了（スペースキーで起動）";
 });
 
@@ -54,51 +113,116 @@ function animate() {
     const t = elapsedTime; 
     
     if (window.currentVrm) {
-        window.currentVrm.update(deltaTime);
+        const vrm = window.currentVrm;
+        const expressionManager = vrm.expressionManager;
+        const humanoid = vrm.humanoid;
 
-        const spine = window.currentVrm.humanoid.getNormalizedBoneNode('spine');
+        // ボーン・表情補間（Lerp）
+        const lerpFactor = 0.08; 
+        currentPose.armLz += (targetPose.armLz - currentPose.armLz) * lerpFactor;
+        currentPose.armLx += (targetPose.armLx - currentPose.armLx) * lerpFactor;
+        currentPose.armRz += (targetPose.armRz - currentPose.armRz) * lerpFactor;
+        currentPose.armRx += (targetPose.armRx - currentPose.armRx) * lerpFactor;
+        currentPose.shoulderZ += (targetPose.shoulderZ - currentPose.shoulderZ) * lerpFactor;
+        currentPose.headX += (targetPose.headX - currentPose.headX) * lerpFactor;
+
+        // 集約パラメータを反映した感情表情の動的適用
+        if (expressionManager) {
+            const currentEmotion = window.currentVrmEmotionName;
+            if (currentEmotion !== 'neutral' && EXPRESSION_CONFIG[currentEmotion]) {
+                const config = EXPRESSION_CONFIG[currentEmotion];
+                if (window.isSpeaking && !config.keepEyes) {
+                    expressionManager.setValue(currentEmotion, config.weightSpeaking);
+                } else {
+                    expressionManager.setValue(currentEmotion, 1.0); // 笑顔時は目を維持するため1.0固定
+                }
+            }
+        }
+
+        // 音量エネルギーのサンプリング
+        let currentVolume = 0;
+        if (window.isSpeaking && window.audioAnalyser) {
+            const array = new Uint8Array(window.audioAnalyser.frequencyBinCount);
+            window.audioAnalyser.getByteTimeDomainData(array);
+            let maxAmp = 0;
+            for (let i = 0; i < array.length; i++) {
+                const val = Math.abs(array[i] - 128);
+                if (val > maxAmp) maxAmp = val;
+            }
+            currentVolume = maxAmp / 128.0;
+        }
+
+        // ボーンノード適用
+        const spine = humanoid.getNormalizedBoneNode('spine');
+        const head = humanoid.getNormalizedBoneNode('head');
+        const leftShoulder = humanoid.getNormalizedBoneNode('leftShoulder');
+        const rightShoulder = humanoid.getNormalizedBoneNode('rightShoulder');
+        const leftUpperArm = humanoid.getNormalizedBoneNode('leftUpperArm');
+        const rightUpperArm = humanoid.getNormalizedBoneNode('rightUpperArm');
+        const leftLowerArm = humanoid.getNormalizedBoneNode('leftLowerArm');
+        const rightLowerArm = humanoid.getNormalizedBoneNode('rightLowerArm');
+
         if (spine) spine.rotation.x = Math.sin(t * 2.5) * 0.01 + 0.01;
-        const head = window.currentVrm.humanoid.getNormalizedBoneNode('head');
-        if (head) head.rotation.y = Math.sin(t * 0.5) * 0.02;
-        
-        const baseY = parseFloat(document.getElementById('param-vrm-y').value);
-        window.currentVrm.scene.position.y = baseY + Math.sin(t * 2.5) * 0.005;
+        if (head) {
+            head.rotation.y = Math.sin(t * 0.5) * 0.02;
+            head.rotation.x = currentPose.headX;
+        }
+        if (leftShoulder) leftShoulder.rotation.z = currentPose.shoulderZ;
+        if (rightShoulder) rightShoulder.rotation.z = -currentPose.shoulderZ;
 
+        if (leftUpperArm) {
+            leftUpperArm.rotation.z = currentPose.armLz + Math.sin(t * 1.5) * 0.02 + Math.cos(t * 0.7) * 0.01;
+            leftUpperArm.rotation.x = currentPose.armLx + Math.sin(t * 0.9) * 0.015;
+        }
+        if (rightUpperArm) {
+            rightUpperArm.rotation.z = currentPose.armRz + Math.sin(t * 1.6) * 0.02 + Math.cos(t * 0.8) * 0.01;
+            rightUpperArm.rotation.x = currentPose.armRx + Math.sin(t * 1.0) * 0.015;
+        }
+        if (leftLowerArm) leftLowerArm.rotation.y = -1.0 + Math.cos(t * 1.3) * 0.03 + Math.sin(t * 0.6) * 0.015;
+        if (rightLowerArm) rightLowerArm.rotation.y = 1.0 + Math.cos(t * 1.4) * 0.03 + Math.sin(t * 0.5) * 0.015;
+
+        const baseY = parseFloat(document.getElementById('param-vrm-y').value);
+        vrm.scene.position.y = baseY + Math.sin(t * 2.5) * 0.005;
+
+        // 自動瞬き（笑顔で発話中は干渉防止のためスキップ）
         blinkTimer += deltaTime;
-        if (blinkTimer >= nextBlinkTime) {
+        const isHappySpeaking = window.isSpeaking && window.currentVrmEmotionName === 'happy';
+        if (blinkTimer >= nextBlinkTime && !isHappySpeaking) {
             const blinkDuration = 0.2;
             const progress = blinkTimer - nextBlinkTime;
             if (progress < blinkDuration) {
                 const blinkVal = Math.sin((progress / blinkDuration) * Math.PI);
-                window.currentVrm.expressionManager.setValue('blink', blinkVal);
+                expressionManager.setValue('blink', blinkVal);
             } else {
-                window.currentVrm.expressionManager.setValue('blink', 0);
+                expressionManager.setValue('blink', 0);
                 blinkTimer = 0;
                 nextBlinkTime = 2.0 + Math.random() * 4.0;
             }
         }
 
-        if (window.isSpeaking && window.currentVrm.expressionManager) {
-            const mouthOpen = Math.sin(t * 15) * 0.4 + 0.4; 
-            window.currentVrm.expressionManager.setValue('aa', mouthOpen);
-        } else if (window.currentVrm.expressionManager) {
-            window.currentVrm.expressionManager.setValue('aa', 0);
+        // 集約パラメータを反映したインテリジェント・リップシンク
+        if (window.isSpeaking && window.audioAnalyser && expressionManager) {
+            if (currentVolume > LIP_SYNC_CONFIG.minVolume) {
+                // 現在の感情状態に応じて、適用するパラメータセットを動的に切り替える
+                const poseMode = (window.currentVrmEmotionName === 'happy') ? LIP_SYNC_CONFIG.happy : LIP_SYNC_CONFIG.neutral;
+                
+                const openScale = Math.min(currentVolume * 2.3, poseMode.maxOpen);
+                const aaBlend = (Math.sin(t * LIP_SYNC_CONFIG.speedAA) + 1.0) * poseMode.aaGain * openScale;
+                const eeBlend = (Math.cos(t * LIP_SYNC_CONFIG.speedEE) + 1.0) * poseMode.eeGain * openScale;
+                const ooBlend = (Math.sin(t * LIP_SYNC_CONFIG.speedOO) + 1.0) * poseMode.ooGain * openScale;
+                
+                expressionManager.setValue('aa', aaBlend);
+                expressionManager.setValue('ee', eeBlend);
+                expressionManager.setValue('oo', ooBlend);
+                ['ih', 'uu'].forEach(v => expressionManager.setValue(v, 0));
+            } else {
+                ['aa', 'ih', 'uu', 'ee', 'oo'].forEach(v => expressionManager.setValue(v, 0));
+            }
+        } else if (expressionManager) {
+            ['aa', 'ih', 'uu', 'ee', 'oo'].forEach(v => expressionManager.setValue(v, 0));
         }
 
-        const leftUpperArm = window.currentVrm.humanoid.getNormalizedBoneNode('leftUpperArm');
-        if (leftUpperArm) {
-            leftUpperArm.rotation.z = 1.3 + Math.sin(t * 1.5) * 0.02 + Math.cos(t * 0.7) * 0.01;
-            leftUpperArm.rotation.x = 0.1 + Math.sin(t * 0.9) * 0.015;
-        }
-        const rightUpperArm = window.currentVrm.humanoid.getNormalizedBoneNode('rightUpperArm');
-        if (rightUpperArm) {
-            rightUpperArm.rotation.z = -1.3 + Math.sin(t * 1.6) * 0.02 + Math.cos(t * 0.8) * 0.01;
-            rightUpperArm.rotation.x = 0.1 + Math.sin(t * 1.0) * 0.015;
-        }
-        const leftLowerArm = window.currentVrm.humanoid.getNormalizedBoneNode('leftLowerArm');
-        if (leftLowerArm) leftLowerArm.rotation.y = -1.0 + Math.cos(t * 1.3) * 0.03 + Math.sin(t * 0.6) * 0.015;
-        const rightLowerArm = window.currentVrm.humanoid.getNormalizedBoneNode('rightLowerArm');
-        if (rightLowerArm) rightLowerArm.rotation.y = 1.0 + Math.cos(t * 1.4) * 0.03 + Math.sin(t * 0.5) * 0.015;
+        vrm.update(deltaTime);
     }
     renderer.render(scene, camera);
 }
